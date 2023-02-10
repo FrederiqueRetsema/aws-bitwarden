@@ -106,8 +106,8 @@ When you just need an IAM user to start the step function that adds/removes ingr
 For most use cases you will use one of the apps to access your credentials. But just when you are on holidays... you might want to add a new credential for that new interesting app you just installed. You can (before your holidays, of course) create a new IAM user in AWS, then add __both__ bitwarden roles to that user. Use a browser to log in to the AWS Console with the new user and then create a cloud shell. Use the following commands to download the script and the config file and set it up for use in the AWS app:
 
 ```
-curl https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/AllowTempAccessInit.json -o AllowTempAccess.json
-curl -O https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/AllowTempAccess.sh 
+curl -O https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/main/AllowTempAccessInit.json -o AllowTempAccess.json
+curl -O https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/main/AllowTempAccessCloudShell.sh 
 chmod 700 ./AllowTempAccess.sh
 ln -s ./AllowTempAccess.sh ./a
 ```
