@@ -93,6 +93,7 @@ The email address is used:
 ## Operations
 - Every night a snapshot is made of the Virtual Machine. The snapshots are stored for 1 month (by default) and removed after that.
 - Executions of Step Functions cannot be removed. They will grow to 1000 executions, then the oldest one is removed by AWS.
+- Every night a yum update is done and bitwarden will be updated (if possible) as well. This is done using the cron on the virtual machine.
 - When you want to make an export of all data in bitwarden, use JSON file type. CSV will NOT contain cards and identities. JSON will. You can import JSON within (an empty version of) bitwarden afterwards. When you import values that are already there then you will have double data in your vault...
 
 ## Using a dedicated user for bitwarden
@@ -106,7 +107,7 @@ When you just need an IAM user to start the step function that adds/removes ingr
 For most use cases you will use one of the apps to access your credentials. But just when you are on holidays... you might want to add a new credential for that new interesting app you just installed. You can (before your holidays, of course) create a new IAM user in AWS, then add __both__ bitwarden roles to that user. Use a browser to log in to the AWS Console with the new user and then create a cloud shell. Use the following commands to download the script and the config file and set it up for use in the AWS app:
 
 ```
-curl -O https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/main/AllowTempAccessInit.json -o AllowTempAccess.json
+curl https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/main/AllowTempAccessInit.json -o AllowTempAccess.json
 curl -O https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/main/AllowTempAccessCloudShell.sh 
 chmod 700 ./AllowTempAccessCloudShell.sh
 ln -s ./AllowTempAccessCloudShell.sh ./a
@@ -119,3 +120,9 @@ Then install the AWS app on your phone and use the newly created users credentia
 ```
 
 to open your vault. 30 minutes later it will be closed again. I used the generic IP addresses 0.0.0.0/0 and ::/0 for this, it's just for 30 minutes and it saves you the trouble to find out which IP address you use on your mobile phone.
+
+## Costs
+The total costs for this application depend on how often you use your vault. The daily costs are $1.10 for EC2 (tax excluded). Please mind the SNS pricing: when you send 7 messages per open/close of the vault and the price per Transactional SMS is $0.1189, then you might have to pay $0,83 per day. During the setup of bitwarden you might consider raising the 30 minutes to 2 or 3 hours (7200 / 108000 seconds).
+
+For details for your region please look at this site: https://aws.amazon.com/sns/sms-pricing/
+
