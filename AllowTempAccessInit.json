@@ -1,0 +1,10 @@
+{
+    "AdminPublicIPv4CIDRs": [
+        "0.0.0.0/0"
+    ],
+    "AdminPublicIPv6CIDRs": [
+      "::/0"
+    ],
+    "OpenDurationSeconds": 1800
+  }
+  

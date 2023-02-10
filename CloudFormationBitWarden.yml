@@ -1,0 +1,1728 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create virtual machine for bitwarden
+
+
+Parameters:
+ 
+  Prefix:
+    Description: Prefix for all resources, in a multi-user environment f.e. myname-bitwarden
+    Type: String
+    Default: bitwarden
+
+  AmazonLinux2AMIID:    
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs
+  EC2InstanceType:
+    Type: String
+    Default: t3.medium
+  DiskTypeRootDisk:
+    Type: String
+    Default: nvme0n1p1
+  DiskTypeBitwardenDisk:
+    Type: String
+    Default: nvme1n1
+
+  DNSRecordName:
+    Type: String
+  DNSDomainName:
+    Type: String
+
+  MailServerPort:
+    Type: String
+
+  AdminEmail:
+    Type: String
+  AdminMobile:
+    Type: String
+
+  SnapshotInterval:
+    Type: String
+    Default: 1
+  SnapshotIntervalUnit:
+    Type: String
+    Default: "MONTHS"
+  RetentionPeriodLogGroups:
+    Type: String
+    Default: 14
+
+  UseCloudShellParameter:
+    Type: String
+    AllowedValues:
+      - "True"
+      - "False"
+    Default: "True"
+
+
+Conditions:
+  UseCloudShell: !Equals
+    - !Ref UseCloudShellParameter 
+    - "True"
+
+
+Resources:
+
+  #
+  # Network
+  # =======
+  #
+
+  # VPC
+
+  BitwardenVpc:
+    Type: AWS::EC2::VPC
+    Properties: 
+      CidrBlock: 10.99.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value:  !Sub "${Prefix}-vpc"
+
+  IPv6CidrBlock:
+    Type: AWS::EC2::VPCCidrBlock
+    Properties:
+      VpcId: !Ref BitwardenVpc
+      AmazonProvidedIpv6CidrBlock: true
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-vpc-igw"
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref BitwardenVpc
+
+  # Subnets
+
+  PublicSubnetAZa:
+    DependsOn: 
+    - IPv6CidrBlock
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      CidrBlock: 10.99.99.0/24
+      Ipv6CidrBlock: 
+        Fn::Sub: 
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: '01::/64'
+            VpcPart: !Select [ 0, !Split [ '00::/56', !Select [ 0, !GetAtt BitwardenVpc.Ipv6CidrBlocks ]]]
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref BitwardenVpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-public-subnet-aza"
+
+  PublicSubnetAZaRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnetAZa
+
+  # NACLs
+
+  NACLPublic:
+    Type: AWS::EC2::NetworkAcl
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-vpc-nacl-public"
+      VpcId: !Ref BitwardenVpc
+
+  NACLPublicIngressIPv4:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: 0.0.0.0/0
+      Egress: False
+      RuleNumber: 100
+      RuleAction: allow
+      NetworkAclId: !Ref NACLPublic
+      PortRange: 
+        From: 0
+        To: 65535
+      Protocol: -1
+
+  NACLPublicIngressIPv6:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      Ipv6CidrBlock: "::/0"
+      Egress: False
+      RuleNumber: 200
+      RuleAction: allow
+      NetworkAclId: !Ref NACLPublic
+      PortRange: 
+        From: 0
+        To: 65535
+      Protocol: -1
+
+  NACLPublicEgressIPv4:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      CidrBlock: "0.0.0.0/0"
+      Egress: True
+      RuleNumber: 100
+      RuleAction: allow
+      NetworkAclId: !Ref NACLPublic
+      PortRange: 
+        From: 0
+        To: 65535
+      Protocol: -1
+
+  NACLPublicEgressIPv6:
+    Type: AWS::EC2::NetworkAclEntry
+    Properties:
+      Ipv6CidrBlock: "::/0"
+      Egress: True
+      RuleNumber: 200
+      RuleAction: allow
+      NetworkAclId: !Ref NACLPublic
+      PortRange: 
+        From: 0
+        To: 65535
+      Protocol: -1
+
+  SubnetNACLAssociationPublicSubnetAZa:
+    Type: AWS::EC2::SubnetNetworkAclAssociation
+    Properties:
+      NetworkAclId: !Ref NACLPublic
+      SubnetId: !Ref PublicSubnetAZa
+
+  # Route tables
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-vpc-public-route-table"
+      VpcId: !Ref BitwardenVpc
+
+  PublicRoutePublicInternetIPv4:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  PublicRoutePublicInternetIPv6:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationIpv6CidrBlock: "::/0"
+      GatewayId: !Ref InternetGateway
+
+  #
+  # Security Group Ingress and Egress via Step Functions and Lambda
+  # ===============================================================
+  #
+
+  AddIngressEgressToSecurityGroupLogGroup:
+    Type: AWS::Logs::LogGroup
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Prefix}-add-ingress-egress-to-security-group-function"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+
+  AddIngressEgressToSecurityGroupExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Prefix}-add-ingress-egress-to-security-group-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+
+  AddIngressEgressToSecurityGroupExecutionRolePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${Prefix}-add-ingress-egress-to-security-group-execution-role-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "CloudWatch"
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+            Resource: "*"
+          -
+            Effect: "Allow"
+            Action: 
+              - "ec2:CreateSecurityGroup"
+              - "ec2:DescribeSecurityGroups"
+              - "ec2:AuthorizeSecurityGroupEgress"
+              - "ec2:AuthorizeSecurityGroupIngress"
+              - "ec2:RevokeSecurityGroupIngress"
+              - "ec2:RevokeSecurityGroupEgress"
+            Resource: "*"
+      Roles:
+        - !Ref AddIngressEgressToSecurityGroupExecutionRole
+
+  AddIngressEgressToSecurityGroupFunction:
+    DependsOn: 
+    - AddIngressEgressToSecurityGroupExecutionRolePolicy
+    - AddIngressEgressToSecurityGroupLogGroup
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Prefix}-add-ingress-egress-to-security-group-function"
+      Handler: index.lambda_handler
+      Role: !GetAtt AddIngressEgressToSecurityGroupExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: !Sub |
+          #!/usr/bin/env python
+          # -*- coding: utf-8 -*-
+          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-lambda-function-code-cfnresponsemodule.html
+
+          import json
+          import cfnresponse
+          import boto3
+ 
+          GROUPNAME_IPv4 = '${Prefix}-vpc-security-group-ipv4'
+          GROUPNAME_IPv6 = '${Prefix}-vpc-security-group-ipv6'
+
+          ec2 = boto3.client('ec2')
+
+
+          def get_group_id_and_ip_permissions_from_group_name(groupname):
+
+              print('TRACE get_group_id_and_ip_permissions_from_group_name')
+
+              response = ec2.describe_security_groups(
+                  Filters=[{
+                    'Name': 'group-name',
+                    'Values': [
+                      groupname
+                    ]
+                  }]
+              )
+
+              print('TRACE response of describe_security_groups: ', response)
+
+              group_id = ''
+              ip_permissions = ''
+              ip_permissions_egress = ''
+              for security_group in response['SecurityGroups']:
+                if security_group['VpcId'] == '${BitwardenVpc}':
+                  group_id = security_group['GroupId']
+                  ip_permissions =  security_group['IpPermissions']
+                  ip_permissions_egress =  security_group['IpPermissionsEgress']
+
+              return { 'group_id': group_id, 'ip_permissions': ip_permissions, 'ip_permissions_egress': ip_permissions_egress }
+
+
+          def revoke_security_group_ingress_ipv4(group_id, ip_protocol, from_port, to_port, ipv4_range):
+
+              print('TRACE revoke_security_group_ingress_ipv4, ipv4_range = '+str(ipv4_range))
+
+              response = ec2.revoke_security_group_ingress(
+                  GroupId = group_id,
+                  IpPermissions = [{
+                    'IpProtocol': ip_protocol,
+                    'FromPort': from_port,
+                    'ToPort': to_port,
+                    'IpRanges': [
+                        ipv4_range
+                    ]
+                  }]
+              )
+
+          def revoke_security_group_ingress_ipv6(group_id, ip_protocol, from_port, to_port, ipv6_range):
+
+              print('TRACE revoke_security_group_ingress_ipv6, ipv6_range = '+str(ipv6_range))
+
+              response = ec2.revoke_security_group_ingress(
+                  GroupId = group_id,
+                  IpPermissions = [{
+                    'IpProtocol': ip_protocol,
+                    'FromPort': from_port,
+                    'ToPort': to_port,
+                    'Ipv6Ranges': [
+                        ipv6_range
+                    ]
+                  }]
+              )
+
+          def revoke_security_group_egress_ipv4(group_id, ip_protocol, from_port, to_port, ipv4_range):
+
+              print('TRACE revoke_security_group_egress_ipv4, ipv4_range = '+str(ipv4_range))
+
+              response = ec2.revoke_security_group_egress(
+                  GroupId = group_id,
+                  IpPermissions = [{
+                    'IpProtocol': ip_protocol,
+                    'FromPort': from_port,
+                    'ToPort': to_port,
+                    'IpRanges': [
+                        ipv4_range
+                    ]
+                  }]
+              )
+
+          def revoke_security_group_egress_ipv6(group_id, ip_protocol, from_port, to_port, ipv6_range):
+
+              print('TRACE revoke_security_group_egress_ipv6, ipv6_range = '+str(ipv6_range))
+
+              response = ec2.revoke_security_group_egress(
+                  GroupId = group_id,
+                  IpPermissions = [{
+                    'IpProtocol': ip_protocol,
+                    'FromPort': from_port,
+                    'ToPort': to_port,
+                    'Ipv6Ranges': [
+                        ipv6_range
+                    ]
+                  }]
+              )
+
+          def delete_current_permissions(group_id, ip_permissions, ip_permissions_egress):
+
+              print('TRACE delete_current_permissions')
+
+              for ip_permission in ip_permissions:
+                  if 'IpRanges' in ip_permission:
+                      ip_protocol = ip_permission['IpProtocol']
+                      from_port = ip_permission['FromPort'] if 'FromPort' in ip_permission else 0
+                      to_port = ip_permission['ToPort'] if 'ToPort' in ip_permission else 65535
+                      for ipv4_range in ip_permission['IpRanges']:
+                          revoke_security_group_ingress_ipv4(group_id, ip_protocol, from_port, to_port, ipv4_range)
+
+                  if 'Ipv6Ranges' in ip_permission:
+                      ip_protocol = ip_permission['IpProtocol']
+                      from_port = ip_permission['FromPort'] if 'FromPort' in ip_permission else 0
+                      to_port = ip_permission['ToPort'] if 'ToPort' in ip_permission else 65535
+                      for ipv6_range in ip_permission['Ipv6Ranges']:
+                          revoke_security_group_ingress_ipv6(group_id, ip_protocol, from_port, to_port, ipv6_range)
+
+              for ip_permission_egress in ip_permissions_egress:
+                  if 'IpRanges' in ip_permission_egress:
+                      ip_protocol = ip_permission_egress['IpProtocol']
+                      from_port = ip_permission_egress['FromPort'] if 'FromPort' in ip_permission_egress else 0
+                      to_port = ip_permission_egress['ToPort'] if 'ToPort' in ip_permission_egress else 65535
+                      for ipv4_range in ip_permission_egress['IpRanges']:
+                          revoke_security_group_egress_ipv4(group_id, ip_protocol, from_port, to_port, ipv4_range)
+
+                  if 'Ipv6Ranges' in ip_permission_egress:
+                      ip_protocol = ip_permission_egress['IpProtocol']
+                      from_port = ip_permission_egress['FromPort'] if 'FromPort' in ip_permission_egress else 0
+                      to_port = ip_permission_egress['ToPort'] if 'ToPort' in ip_permission_egress else 65535
+                      for ipv6_range in ip_permission_egress['Ipv6Ranges']:
+                          revoke_security_group_egress_ipv6(group_id, ip_protocol, from_port, to_port, ipv6_range)
+                    
+
+          def authorize_security_group_ingress_ipv4(group_id, admin_ipv4_cidr, port_number):
+
+            print('TRACE authorize_security_group_ingress_ipv4: group_id = '+group_id+', port_number = '+str(port_number)+', admin_ipv6_cidr = '+admin_ipv4_cidr)
+
+            ec2.authorize_security_group_ingress(
+              GroupId = group_id,
+              IpPermissions = [{
+                'FromPort': port_number,
+                'ToPort': port_number,
+                'IpProtocol': 'TCP',
+                'IpRanges': [{
+                  'CidrIp': admin_ipv4_cidr,
+                  'Description': 'Open port ' + str(port_number) + ' to ' + admin_ipv4_cidr
+                }]
+              }]
+            )
+
+
+          def authorize_security_group_egress_ipv4(group_id, ipv4_cidr, port_number):
+
+            print('TRACE authorize_security_group_egress_ipv4: group_id = '+group_id+', port_number = '+str(port_number)+', ipv6_cidr = '+ipv4_cidr)
+
+            ec2.authorize_security_group_egress(
+              GroupId = group_id,
+              IpPermissions = [{
+                'FromPort': port_number,
+                'ToPort': port_number,
+                'IpProtocol': 'TCP',
+                'IpRanges': [{
+                  'CidrIp': ipv4_cidr,
+                  'Description': 'Open port ' + str(port_number) + ' to ' + ipv4_cidr
+                }]
+              }]
+            )
+
+
+          def authorize_security_group_ingress_ipv6(group_id, admin_ipv6_cidr, port_number):
+
+            print('TRACE authorize_security_group_ingress_ipv6: group_id = '+group_id+', port_number = '+str(port_number)+', admin_ipv6_cidr = '+admin_ipv6_cidr)
+
+            ec2.authorize_security_group_ingress(
+              GroupId = group_id,
+              IpPermissions = [{
+                'FromPort': port_number,
+                'ToPort': port_number,
+                'IpProtocol': 'TCP',
+                'Ipv6Ranges': [{
+                  'CidrIpv6': admin_ipv6_cidr,
+                  'Description': 'Open port ' + str(port_number) + ' to ' + admin_ipv6_cidr
+                }]
+              }]
+            )
+
+
+          def authorize_security_group_egress_ipv6(group_id, ipv6_cidr, port_number):
+
+            print('TRACE authorize_security_group_egress_ipv6: group_id = '+group_id+', port_number = '+str(port_number)+', ipv6_cidr = '+ipv6_cidr)
+
+            ec2.authorize_security_group_egress(
+              GroupId = group_id,
+              IpPermissions = [{
+                'FromPort': port_number,
+                'ToPort': port_number,
+                'IpProtocol': 'TCP',
+                'Ipv6Ranges': [{
+                  'CidrIpv6': ipv6_cidr,
+                  'Description': 'Open port ' + str(port_number) + ' to ' + ipv6_cidr
+                }]
+              }]
+            )
+
+          
+          def delete_current_permissions_from_group(group_id_and_ip_permissions):
+
+            group_id = group_id_and_ip_permissions['group_id']
+            ip_permissions = group_id_and_ip_permissions['ip_permissions']
+            ip_permissions_egress = group_id_and_ip_permissions['ip_permissions_egress']
+
+            delete_current_permissions(group_id, ip_permissions, ip_permissions_egress)
+
+
+          # Main
+          # ====
+
+          def lambda_handler(event, context):
+
+            print("TRACE event: ", event)
+
+            admin_public_ipv4_cidrs = event['AdminPublicIPv4CIDRs']
+            admin_public_ipv6_cidrs = event['AdminPublicIPv6CIDRs']
+
+            success = True
+            try:
+ 
+                group_id_and_ip_permissions = get_group_id_and_ip_permissions_from_group_name(GROUPNAME_IPv4)
+                group_id_ipv4 = group_id_and_ip_permissions['group_id']
+                delete_current_permissions_from_group(group_id_and_ip_permissions)
+
+                group_id_and_ip_permissions = get_group_id_and_ip_permissions_from_group_name(GROUPNAME_IPv6)
+                group_id_ipv6 = group_id_and_ip_permissions['group_id']
+                delete_current_permissions_from_group(group_id_and_ip_permissions)
+
+                for admin_public_ipv4_cidr in admin_public_ipv4_cidrs:
+                  authorize_security_group_ingress_ipv4(group_id_ipv4, admin_public_ipv4_cidr, 80)
+                  authorize_security_group_ingress_ipv4(group_id_ipv4, admin_public_ipv4_cidr, 443)
+
+                for admin_public_ipv6_cidr in admin_public_ipv6_cidrs:
+                  authorize_security_group_ingress_ipv6(group_id_ipv6, admin_public_ipv6_cidr, 80)
+                  authorize_security_group_ingress_ipv6(group_id_ipv6, admin_public_ipv6_cidr, 443)
+
+                authorize_security_group_egress_ipv4(group_id_ipv4, "0.0.0.0/0", 80)
+                authorize_security_group_egress_ipv4(group_id_ipv4, "0.0.0.0/0", 443)
+                authorize_security_group_egress_ipv4(group_id_ipv4, "0.0.0.0/0", ${MailServerPort})
+
+                authorize_security_group_egress_ipv6(group_id_ipv6, "::/0", 80)
+                authorize_security_group_egress_ipv6(group_id_ipv6, "::/0", 443)
+                authorize_security_group_egress_ipv6(group_id_ipv6, "::/0", ${MailServerPort})
+
+            except Exception as e:
+
+                print(e)
+                raise e
+
+            return
+      Runtime: python3.9
+
+  #
+  # StepFunction AllowTemporaryAccessForAdmins
+  # ==========================================
+  #
+
+  EC2BitwardenSecurityGroupIPv6:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Prefix}-vpc-security-group-ipv6'  # Name must match name in Lambda
+      GroupDescription: !Sub "Securitygroup for IPv6 for ${Prefix}"
+      VpcId: !Ref BitwardenVpc
+      # Ingress and Egress is done by Step Functions + Lambda functions
+
+  EC2BitwardenSecurityGroupIPv4:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub '${Prefix}-vpc-security-group-ipv4'
+      GroupDescription: !Sub "Securitygroup for IPv4 for ${Prefix}"
+      VpcId: !Ref BitwardenVpc
+      # Ingress and Egress is done by Step Functions + Lambda functions
+
+  AllowTemporaryAccessForAdminsExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Prefix}-allow-temporary-access-for-admins-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "states.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+
+  AllowTemporaryAccessForAdminsExecutionRolePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${Prefix}-allow-temporary-access-for-admins-execution-role-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "CloudWatch"
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+            Resource: "*"
+          - Effect: "Allow"
+            Action: 
+              - "lambda:InvokeFunction"
+            Resource: !GetAtt AddIngressEgressToSecurityGroupFunction.Arn
+          - Effect: "Allow"
+            Action: 
+              - "sns:Publish"
+            Resource: !GetAtt AlarmTopicSMS.TopicArn
+      Roles:
+        - !Ref AllowTemporaryAccessForAdminsExecutionRole
+
+  AllowTemporaryAccessForAdmins:
+    Type: AWS::StepFunctions::StateMachine
+    Properties:
+      StateMachineName: !Sub "${Prefix}-allow-temporary-access-for-administrators"
+      DefinitionString: !Sub | 
+        {
+          "Comment": "Allow temporary access for administrators",
+          "StartAt": "Allow access for admins",
+          "States": {
+            "Allow access for admins": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "ResultPath": null,
+              "Parameters": {
+                "Payload.$": "$",
+                "FunctionName": "${AddIngressEgressToSecurityGroupFunction.Arn}"
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [ {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "LambdaError"
+              }],
+              "Next": "DetermineSecondsToWait"
+            },
+            "DetermineSecondsToWait": {
+              "Type": "Pass",
+              "Parameters": {
+                "secondsToWaitBeforeWarningToSNS.$": "States.MathAdd($.OpenDurationSeconds, -300)" 
+              },
+              "Next": "Wait for raising alarm"
+            },
+            "Wait for raising alarm": {
+              "Type": "Wait",
+              "SecondsPath": "$.secondsToWaitBeforeWarningToSNS",
+              "Next": "Raise alarm"
+            },
+            "Raise alarm": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AlarmTopicSMS.TopicArn}",
+                "Message": "WARNING: not long before access to the vault will be revoked"
+              },
+              "Next": "Wait for revoke access for admins"
+            },
+            "Wait for revoke access for admins": {
+              "Type": "Wait",
+              "Seconds": 300,
+              "Next": "Revoke access for admins"
+            },
+            "Revoke access for admins": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::lambda:invoke",
+              "OutputPath": "$.Payload",
+              "Parameters": {
+                "FunctionName": "${AddIngressEgressToSecurityGroupFunction.Arn}",
+                "Payload": {
+                  "AdminPublicIPv4CIDRs": [],
+                  "AdminPublicIPv6CIDRs": []
+                }
+              },
+              "Retry": [
+                {
+                  "ErrorEquals": [
+                    "Lambda.ServiceException",
+                    "Lambda.AWSLambdaException",
+                    "Lambda.SdkClientException",
+                    "Lambda.TooManyRequestsException"
+                  ],
+                  "IntervalSeconds": 2,
+                  "MaxAttempts": 6,
+                  "BackoffRate": 2
+                }
+              ],
+              "Catch": [ {
+                "ErrorEquals": ["States.ALL"],
+                "Next": "LambdaError"
+              }],
+              "End": true
+            },
+            "LambdaError": {
+              "Type": "Task",
+              "Resource": "arn:${AWS::Partition}:states:::sns:publish",
+              "Parameters": {
+                "TopicArn": "${AlarmTopicSMS.TopicArn}",
+                "Message": "ERROR: Lambda to change security groups failed"
+              },
+              "End": true
+            }
+          }
+        }
+      RoleArn: !GetAtt AllowTemporaryAccessForAdminsExecutionRole.Arn
+
+  #
+  # Bitwarden EC2
+  # =============
+  #
+
+  EC2BitwardenExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Prefix}-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "ec2.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+
+  EC2BitwardenExecutionRolePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${Prefix}-execution-role-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Sid: "CloudWatch"
+            Effect: "Allow"
+            Action: 
+              - "logs:CreateLogStream"
+              - "logs:CreateLogGroup"
+              - "logs:PutLogEvents"
+              - "cloudwatch:PutMetricData"
+            Resource: "*"
+      Roles:
+        - !Ref EC2BitwardenExecutionRole
+
+  EC2BitwardenIamInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2BitwardenExecutionRole
+
+  EC2BitwardenEncryptedVolume:
+    Type: AWS::EC2::Volume
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      Encrypted: true
+      AvailabilityZone: !Sub "${AWS::Region}a"
+      Size: 25
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-data-volume"
+
+  EC2BitwardenVarLogMessages:
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ec2/${Prefix}-ec2-instance/messages"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+
+  EC2BitwardenVarLogCloudInitOutputLog:
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ec2/${Prefix}-ec2-instance/cloud-init-output"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+
+  EC2BitwardenVarLogCfnInitCmdLog:
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ec2/${Prefix}-ec2-instance/cfn-init-cmd"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+  
+  EC2BitwardenOptBitwardenLogsNginxAccessLog:
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ec2/${Prefix}-ec2-instance/nginx/access-log"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+  
+  EC2BitwardenOptBitwardenLogsNginxErrorLog:
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/ec2/${Prefix}-ec2-instance/nginx/error-log"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+  
+  EC2Bitwarden:
+    DependsOn: 
+    - IPv6CidrBlock
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT15M
+    Metadata:
+      'AWS::CloudFormation::Init':
+        config:
+          files:
+            '/opt/aws/amazon-cloudwatch-agent/etc/amazon-cloudwatch-agent.json':
+              content: !Sub |
+                {
+                    "agent": {
+                      "metrics_collection_interval": 60,
+                      "run_as_user": "cwagent"
+                    },
+                    "logs": {
+                      "logs_collected": {
+                          "files": {
+                                  "collect_list": [
+                                          {
+                                                  "file_path": "/var/log/messages",
+                                                  "log_group_name": "${EC2BitwardenVarLogMessages}"
+                                          },
+                                          {
+                                                  "file_path": "/var/log/cloud-init-output.log",
+                                                  "log_group_name": "${EC2BitwardenVarLogCloudInitOutputLog}"
+                                          },
+                                          {
+                                                  "file_path": "/var/log/cfn-init-cmd.log",
+                                                  "log_group_name": "${EC2BitwardenVarLogCfnInitCmdLog}"
+                                          },
+                                          {
+                                                  "file_path": "/opt/bitwarden/bwdata/logs/nginx/access.log",
+                                                  "log_group_name": "${EC2BitwardenOptBitwardenLogsNginxAccessLog}"
+                                          },
+                                          {
+                                                  "file_path": "/opt/bitwarden/bwdata/logs/nginx/error.log",
+                                                  "log_group_name": "${EC2BitwardenOptBitwardenLogsNginxErrorLog}"
+                                          }
+                                ]
+                            }
+                      }
+                    },
+                    "metrics": {
+                      "metrics_collected": {
+                          "disk": {
+                                  "measurement": [
+                                          "used_percent"
+                                  ],
+                                  "metrics_collection_interval": 60,
+                                  "resources": [
+                                          "*"
+                                  ]
+                          },
+                          "mem": {
+                                  "measurement": [
+                                          "mem_used_percent"
+                                  ],
+                                  "metrics_collection_interval": 60
+                          },
+                          "cpu": {
+                                  "measurement": [
+                                            "usage_active"
+                                  ],
+                                  "totalcpu": true,
+                                  "metrics_collection_interval": 60
+                          }
+                        }
+                      }
+                }
+
+            '/opt/bitwarden-install/00-install-cloudwatch-agent.sh':
+              content: |
+                #!/bin/bash
+                #
+                # Install the cloudwatch agent (see also: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/download-cloudwatch-agent-commandline.html)
+                #
+                # Check fingerprint:
+                # - See: https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/verify-CloudWatch-Agent-Package-Signature.html
+                #
+
+                install_cloudwatch() {
+                    yum install amazon-cloudwatch-agent -y
+                    systemctl enable --now amazon-cloudwatch-agent
+                }
+
+                change_ownership_root_cwagent() {
+                    chown root:cwagent /var/log/messages
+                    chmod 640 /var/log/messages
+
+                    chown root:cwagent /var/log/cloud-init-output.log
+                    chmod 640 /var/log/cloud-init-output.log
+                }
+
+                install_cloudwatch
+                change_ownership_root_cwagent
+              mode: 00500        
+
+            '/opt/bitwarden-install/01-mount-disk.sh':
+              content: |
+                #!/bin/bash
+                
+                mkdir -p /opt/bitwarden
+
+                mkfs -t xfs /dev/sdf
+                mount /dev/sdf /opt/bitwarden
+              mode: 00500
+
+            '/opt/bitwarden-install/02-install-docker-and-docker-compose.sh':
+              content: |
+                #!/bin/bash
+
+                amazon-linux-extras install docker -y
+                systemctl enable docker --now
+                usermod -a -G docker ec2-user
+
+                curl -L "https://github.com/docker/compose/releases/download/1.29.2/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+                chmod +x /usr/local/bin/docker-compose
+
+                # Amazon Linux 2 doesn't have /usr/local/bin in the PATH by default, add it to the general profile for all users
+                echo "PATH=$PATH:/usr/local/bin" >> /etc/profile
+                echo "export PATH" >> /etc/profile
+
+              mode: 00500        
+
+            '/opt/bitwarden-install/03-create-bitwarden-user-and-directory.sh':
+              content: |
+                #!/bin/bash
+              
+                useradd bitwarden
+                usermod -aG docker bitwarden
+
+                chmod -R 700 /opt/bitwarden
+                chown -R bitwarden:bitwarden /opt/bitwarden
+
+              mode: 00500        
+
+            '/opt/bitwarden-install/05-install-bitwarden.sh':
+              content: |
+                #!/bin/bash
+
+                su bitwarden -
+
+                cd /opt/bitwarden
+                curl -Lso bitwarden.sh https://go.btwrdn.co/bw-sh
+                chmod 700 bitwarden.sh
+
+                exit # Become root again
+                chown bitwarden:bitwarden /opt/bitwarden/bitwarden.sh
+
+                # Do ./bitwarden.sh install manually yourself, see the readme.md 
+
+              mode: 00500        
+
+            '/etc/cron.daily/bitwarden':
+              content: |
+                #!/bin/bash
+
+                yum update -y
+
+                cd /opt/bitwarden
+                su bitwarden ./bitwarden.sh updateself
+                su bitwarden ./bitwarden.sh update
+
+              mode: 00500        
+
+          commands:
+            00-install-cloudwatch-agent:
+              command: /opt/bitwarden-install/00-install-cloudwatch-agent.sh            
+            01-mount-disk:
+              command: /opt/bitwarden-install/01-mount-disk.sh
+            02-install-docker-and-docker-compose:
+              command: /opt/bitwarden-install/02-install-docker-and-docker-compose.sh
+            03-create-bitwarden-user-and-directory:
+              command: /opt/bitwarden-install/03-create-bitwarden-user-and-directory.sh
+            05-install-bitwarden:
+              command: /opt/bitwarden-install/05-install-bitwarden.sh            
+    Properties:
+      ImageId: !Ref AmazonLinux2AMIID
+      InstanceType: !Ref EC2InstanceType
+      IamInstanceProfile: !Ref EC2BitwardenIamInstanceProfile
+      BlockDeviceMappings:
+        - DeviceName: "/dev/xvda"
+          Ebs:
+            VolumeSize: 8
+            Encrypted: True
+      Volumes:
+        - Device: /dev/sdf
+          VolumeId: !Ref EC2BitwardenEncryptedVolume
+      NetworkInterfaces:
+        - DeviceIndex: 0
+          Description: "IPv6"
+          DeleteOnTermination: true
+          SubnetId: !Ref PublicSubnetAZa
+          GroupSet:
+            - !Ref EC2BitwardenSecurityGroupIPv4
+            - !Ref EC2BitwardenSecurityGroupIPv6
+          Ipv6Addresses:
+            - Ipv6Address: 
+                !Sub 
+                  - "${VpcPart}${SubnetPart}"
+                  - SubnetPart: "01::a"
+                    VpcPart: !Select [ 0, !Split [ "00::/56", !Select [ 0, !GetAtt BitwardenVpc.Ipv6CidrBlocks ]]]
+          AssociatePublicIpAddress: true
+      UserData: 
+        "Fn::Base64": !Sub |
+            #!/bin/bash
+
+            /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource EC2Bitwarden --region ${AWS::Region}
+            /opt/aws/bin/cfn-signal -e $? --stack "${AWS::StackName}" --resource EC2Bitwarden --region "${AWS::Region}"
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-ec2-instance"
+
+  # DNS
+
+  DNSRecordIPv6:
+    DependsOn: 
+    - IPv6CidrBlock
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub "${DNSRecordName}.${DNSDomainName}"
+      HostedZoneName: !Ref DNSDomainName
+      Type: AAAA
+      TTL: 300
+      ResourceRecords:
+         - !Sub 
+          - "${VpcPart}${SubnetPart}"
+          - SubnetPart: "01::a"
+            VpcPart: !Select [ 0, !Split [ "00::/56", !Select [ 0, !GetAtt BitwardenVpc.Ipv6CidrBlocks ]]]
+
+  DNSRecordIPv4:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      Name: !Sub "${DNSRecordName}.${DNSDomainName}"
+      HostedZoneName: !Ref DNSDomainName
+      Type: A
+      TTL: 500
+      ResourceRecords:
+        - !GetAtt EC2Bitwarden.PublicIp
+
+  #
+  # Automatically create snapshots
+  # ==============================
+  #
+
+  SnapshotExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Prefix}-snapshot-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "dlm.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      ManagedPolicyArns:
+        - !Sub "arn:${AWS::Partition}:iam::aws:policy/service-role/AWSDataLifecycleManagerServiceRole"
+
+  CreateDeleteSnapshots:
+    Type: AWS::DLM::LifecyclePolicy
+    Properties:
+      Description: !Sub "${Prefix} - create daily snapshots of all volumes attached on the VM"
+      ExecutionRoleArn: !GetAtt SnapshotExecutionRole.Arn
+      State: ENABLED
+      PolicyDetails:
+        PolicyType: EBS_SNAPSHOT_MANAGEMENT
+        ResourceTypes: 
+        - INSTANCE
+        Schedules:
+          - Name: OnceADay
+            CopyTags: True
+            CreateRule:
+              CronExpression: "cron(0 1 * * ? *)"
+              Location: CLOUD
+            RetainRule:
+              Interval: !Ref SnapshotInterval
+              IntervalUnit: !Ref SnapshotIntervalUnit
+        TargetTags:
+          - Key: Name
+            Value: !Sub "${Prefix}-ec2-instance" 
+      Tags:
+        - Key: Name
+          Value: !Sub "${Prefix}-lifecycle-management"
+
+  #
+  # FlowLogs
+  # ========
+  #
+
+  FlowLogsLogGroup:
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/vpc/${Prefix}-flowlogs"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+
+  FlowLogExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Prefix}-flow-log-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "vpc-flow-logs.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+
+  FlowLogExecutionRolePolicy:
+    DependsOn: FlowLogsLogGroup
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${Prefix}-flow-log-execution-role-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+              - "logs:DescribeLogGroups"
+              - "logs:DescribeLogStreams"
+            Resource: !Sub "${FlowLogsLogGroup.Arn}:*"
+      Roles:
+        - !Ref FlowLogExecutionRole
+
+  FlowLogPrivateSubnetReadOnlyAZa:
+    Type: AWS::EC2::FlowLog
+    Properties:
+      DeliverLogsPermissionArn: !GetAtt FlowLogExecutionRole.Arn
+      LogDestinationType: cloud-watch-logs
+      LogGroupName: !Ref FlowLogsLogGroup
+      MaxAggregationInterval: 60
+      ResourceId: !Ref PublicSubnetAZa
+      ResourceType: Subnet
+      TrafficType: ALL
+
+  #
+  # Alarms & events
+  # ===============
+  #
+
+  # SNS Topics
+
+  AlarmTopicSMS:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Delete
+    Properties:
+      TopicName: !Sub "${Prefix}-sns-topic-sms"
+      Subscription: 
+        - Endpoint: !Ref AdminMobile
+          Protocol: sms
+
+  AlarmTopicMail:
+    Type: AWS::SNS::Topic
+    DeletionPolicy: Delete
+    Properties:
+      TopicName: !Sub "${Prefix}-sns-topic-email"
+      Subscription: 
+        - Endpoint: !Ref AdminEmail
+          Protocol: email
+
+  SNSAccessPoliciesAlarmTopicMail:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "__default_statement_ID"
+            Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action:
+              - "sns:GetTopicAttributes"
+              - "sns:SetTopicAttributes"
+              - "sns:AddPermission"
+              - "sns:RemovePermission"
+              - "sns:DeleteTopic"
+              - "sns:Subscribe"
+              - "sns:ListSubscriptionsByTopic"
+              - "sns:Publish"
+            Resource:
+              - !GetAtt AlarmTopicMail.TopicArn
+            Condition:
+              StringEquals:
+                "AWS:SourceOwner": !Sub "${AWS::AccountId}"          
+          - Effect: Allow
+            Principal:
+              Service: events.amazonaws.com
+            Action: sns:Publish
+            Resource: !Ref AlarmTopicMail
+      Topics:
+        - !Ref AlarmTopicMail
+
+  SNSAccessPoliciesAlarmTopicSMS:
+    Type: AWS::SNS::TopicPolicy
+    Properties:
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: "__default_statement_ID"
+            Effect: "Allow"
+            Principal:
+              AWS: "*"
+            Action:
+              - "sns:GetTopicAttributes"
+              - "sns:SetTopicAttributes"
+              - "sns:AddPermission"
+              - "sns:RemovePermission"
+              - "sns:DeleteTopic"
+              - "sns:Subscribe"
+              - "sns:ListSubscriptionsByTopic"
+              - "sns:Publish"
+            Resource:
+              - !GetAtt AlarmTopicSMS.TopicArn
+            Condition:
+              StringEquals:
+                "AWS:SourceOwner": !Sub "${AWS::AccountId}"
+          - Sid: "Step Function"
+            Effect: "Allow"
+            Principal:
+              Service: 
+                - events.amazonaws.com
+                - states.amazonaws.com
+            Action: 
+              - "sns:Publish"
+            Resource: !GetAtt AlarmTopicSMS.TopicArn
+      Topics:
+        - !Ref AlarmTopicSMS
+
+  # EventBridge Rules
+
+  WarnForModifySecurityGroupIngress:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Prefix}-warn-for-modify-security-group-ingress"
+      Description: !Sub "${Prefix}: warn for modify security group ingress"
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - ModifySecurityGroupRules
+      State: ENABLED
+      Targets:
+        - Id: AlarmTopicSMS
+          Arn: !GetAtt AlarmTopicSMS.TopicArn
+          InputTransformer:
+            InputPathsMap:
+              userIdentity: $.detail.userIdentity.principalId
+              ingressRuleCidripv4: $.detail.requestParameters.ModifySecurityGroupRulesRequest.SecurityGroupRule.SecurityGroupRule.CidrIpv4
+              ingressRuleCidripv6: $.detail.requestParameters.ModifySecurityGroupRulesRequest.SecurityGroupRule.SecurityGroupRule.CidrIpv6
+              fromPortNumber: $.detail.requestParameters.ModifySecurityGroupRulesRequest.SecurityGroupRule.SecurityGroupRule.FromPort
+              toPortNumber: $.detail.requestParameters.ModifySecurityGroupRulesRequest.SecurityGroupRule.SecurityGroupRule.ToPort
+            InputTemplate: >-
+              "<userIdentity> might have modified ingress rule: new value is 
+              <ingressRuleCidripv4><ingressRuleCidripv6>:<fromPortNumber>-<toPortNumber>."
+
+  WarnForAuthorizeSecurityGroupIngress:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Prefix}-warn-for-authorize-security-group-ingress"
+      Description: !Sub "${Prefix}: warn for authorize security group ingress"
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - AuthorizeSecurityGroupIngress
+            - RevokeSecurityGroupIngress
+      State: ENABLED
+      Targets:
+        - Id: AlarmTopicSMS
+          Arn: !GetAtt AlarmTopicSMS.TopicArn
+          InputTransformer:
+            InputPathsMap:
+              eventName: $.detail.eventName
+              userIdentity: $.detail.userIdentity.principalId
+              ingressRuleCidripv4: $.detail.requestParameters.ipPermissions.items[0].ipRanges.items[0].cidrIp
+              ingressRuleCidripv6: $.detail.requestParameters.ipPermissions.items[0].ipv6Ranges.items[0].cidrIpv6
+              fromPortNumber: $.detail.requestParameters.ipPermissions.items[0].fromPort
+              toPortNumber: $.detail.requestParameters.ipPermissions.items[0].toPort
+            InputTemplate: >-
+              "<userIdentity> changed at least one ingress rule: 
+              <eventName> on <ingressRuleCidripv4><ingressRuleCidripv6>:<fromPortNumber>-<toPortNumber>."
+
+  WarnForChangeOfNetworkAdapters:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Prefix}-warn-for-change-of-network-adapters"
+      Description: !Sub "${Prefix}: warn for change of network adapters"
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ec2.amazonaws.com
+          eventName:
+            - ModifyNetworkInterfaceAttribute
+      State: ENABLED
+      Targets:
+        - Id: AlarmTopicSMS
+          Arn: !GetAtt AlarmTopicSMS.TopicArn
+          InputTransformer:
+            InputPathsMap:
+              userIdentity: $.detail.userIdentity.principalId
+            InputTemplate: >-
+              "<userIdentity> changed a networkinterface. 
+              Might be the security group."
+
+  WarnForSessionToEC2:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Prefix}-warn-for-session-to-ec2"
+      Description: !Sub "${Prefix}: warn for session to ec2"
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.ssm
+        detail-type:
+          - AWS API Call via CloudTrail
+        detail:
+          eventSource:
+            - ssm.amazonaws.com
+          eventName:
+            - StartSession
+            - SendCommand
+      State: ENABLED
+      Targets:
+        - Id: AlarmTopicMail
+          Arn: !GetAtt AlarmTopicMail.TopicArn
+          InputTransformer:
+            InputPathsMap:
+              userIdentity: $.detail.userIdentity.principalId
+              sourceIpAddress: $.detail.sourceIPAddress
+              eventName: $.detail.eventName
+            InputTemplate: !Sub >-
+              "<userIdentity> from <sourceIpAddress>
+              used <eventName> to ${Prefix}"
+
+  WarnForFailedSnapshot:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub "${Prefix}-warn-for-failed-snapshot"
+      Description: !Sub "${Prefix}: warn for failed snapshot"
+      EventBusName: default
+      EventPattern:
+        source:
+          - aws.ec2
+        detail-type:
+          - EBS Snapshot Notification
+        detail:
+          event:
+            - createSnapshot
+          result:
+           - failed
+      State: ENABLED
+      Targets:
+        - Id: AlarmTopicMail
+          Arn: !GetAtt AlarmTopicMail.TopicArn
+
+  # CloudWatch Alarms
+
+  CpuAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-cpu-alarm"
+      ActionsEnabled: true
+      AlarmActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Dimensions:
+        - Name: host
+          Value: !GetAtt EC2Bitwarden.PrivateDnsName
+        - Name: cpu
+          Value: cpu-total
+      AlarmDescription: !Sub "CPU of ${Prefix} not higher than 80%"
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 2    # 2 out of 3
+      EvaluationPeriods: 3
+      Period: 300             # seconds = 5 min
+      MetricName: cpu_usage_active
+      OKActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Namespace: CWAgent
+      Statistic: Average
+      Threshold: 80
+      Unit: Percent
+
+  MemAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-mem-alarm"
+      ActionsEnabled: true
+      AlarmActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Dimensions:
+        - Name: host
+          Value: !GetAtt EC2Bitwarden.PrivateDnsName
+      AlarmDescription: !Sub "Memory usage of ${Prefix} not higher than 80%"
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 2    # 2 out of 3
+      EvaluationPeriods: 3
+      Period: 300             # seconds
+      MetricName: mem_used_percent
+      OKActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Namespace: CWAgent
+      Statistic: Average
+      Threshold: 80
+      Unit: Percent
+
+  DiskAlarmRootDisk:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-root-disk-alarm"
+      ActionsEnabled: true
+      AlarmActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Dimensions:
+        - Name: device
+          Value: !Ref DiskTypeRootDisk
+        - Name: fstype
+          Value: xfs
+        - Name: host
+          Value: !GetAtt EC2Bitwarden.PrivateDnsName
+        - Name: path
+          Value: /
+      AlarmDescription: !Sub "CPU of ${Prefix} not higher than 80%"
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 2    # 2 out of 3
+      EvaluationPeriods: 3
+      Period: 300             # seconds = 5 min
+      MetricName: disk_used_percent
+      OKActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Namespace: CWAgent
+      Statistic: Average
+      Threshold: 80
+      Unit: Percent
+
+  DiskAlarmBitwardenDisk:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub "${Prefix}-bitwarden-disk-alarm"
+      ActionsEnabled: true
+      AlarmActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Dimensions:
+        - Name: device
+          Value: !Ref DiskTypeBitwardenDisk
+        - Name: fstype
+          Value: xfs
+        - Name: host
+          Value: !GetAtt EC2Bitwarden.PrivateDnsName
+        - Name: path
+          Value: /opt/bitwarden
+      AlarmDescription: !Sub "CPU of ${Prefix} not higher than 80%"
+      ComparisonOperator: GreaterThanThreshold
+      DatapointsToAlarm: 2    # 2 out of 3
+      EvaluationPeriods: 3
+      Period: 300             # seconds = 5 min
+      MetricName: disk_used_percent
+      OKActions:
+        - !GetAtt AlarmTopicMail.TopicArn
+      Namespace: CWAgent
+      Statistic: Average
+      Threshold: 80
+      Unit: Percent
+
+  #
+  # DeleteSecurityGroups
+  # ====================
+  #
+
+  # When the VPC is deleted, there might be extra security groups that have been added because someone tried f.e. to start a VM in that VPC. The deletion of the VPC
+  # will wait until these SGs have been removed. This is not friendly for the users of the templates, so delete the SGs by this custom resource.  
+
+  DeleteSecurityGroupsLogGroup:
+    Type: AWS::Logs::LogGroup
+    UpdateReplacePolicy: Delete
+    DeletionPolicy: Delete
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${Prefix}-delete-security-groups-function"
+      RetentionInDays: !Ref RetentionPeriodLogGroups
+
+  DeleteSecurityGroupsExecutionRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Prefix}-delete-security-groups-execution-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+
+  DeleteSecurityGroupsExecutionRolePolicy:
+    Type: "AWS::IAM::Policy"
+    Properties:
+      PolicyName: !Sub "${Prefix}-delete-security-groups-execution-role-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - "logs:PutLogEvents"
+              - "logs:CreateLogStream"
+            Resource: "*"
+          -
+            Effect: "Allow"
+            Action: 
+              - "ec2:DescribeSecurityGroups"  
+            Resource: "*" 
+          -
+            Effect: "Allow"
+            Action: 
+              - "ec2:DeleteSecurityGroup"
+            Resource: "*"
+      Roles:
+        - !Ref DeleteSecurityGroupsExecutionRole
+
+  DeleteSecurityGroupsFunction:
+    DependsOn: 
+    - DeleteSecurityGroupsExecutionRolePolicy
+    - DeleteSecurityGroupsLogGroup
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Prefix}-delete-security-groups-function"
+      Handler: index.lambda_handler
+      Role: !GetAtt DeleteSecurityGroupsExecutionRole.Arn
+      Timeout: 60
+      Code:
+        ZipFile: |
+          #!/usr/bin/env python
+          # -*- coding: utf-8 -*-
+          # https://docs.aws.amazon.com/AWSCloudFormation/latest/UserGuide/cfn-lambda-function-code-cfnresponsemodule.html
+
+          import json
+          import cfnresponse
+          import boto3
+
+          def get_security_groups(vpc):
+
+            ec2 = boto3.client('ec2')
+            response = ec2.describe_security_groups(
+                Filters=[
+                    {
+                        'Name': 'vpc-id',
+                        'Values': [vpc]
+                    },
+                ]
+            )
+
+            return response["SecurityGroups"]
+
+
+          def delete_security_group(security_group_name, security_group_id):
+
+            print("TRACE Delete security group " + security_group_name)
+
+            ec2 = boto3.client('ec2')
+            response = ec2.delete_security_group(
+              GroupId=security_group_id
+            )
+
+            print(response)
+
+
+          # Main
+          # ====
+
+          def lambda_handler(event, context):
+            try:
+
+                vpc = event['ResourceProperties']['Vpc']
+                print(event)
+
+                if event['RequestType'] == 'Delete':
+
+                    print ("TRACE Get security groups")
+
+                    security_groups = get_security_groups(vpc)
+                    print(security_groups)
+
+                    for security_group in security_groups:
+
+                      security_group_is_part_of_stack = False
+                      if ("Tags" in security_group):
+                        for tag in security_group["Tags"]:
+                          if (tag["Key"] == "aws:cloudformation:stack-name"):
+                            security_group_is_part_of_stack = True
+
+                      security_group_name = security_group["GroupName"]
+                      security_group_id   = security_group["GroupId"]
+
+                      if ((not security_group_is_part_of_stack) and 
+                          (security_group_name != "default")):
+                        delete_security_group(security_group_name, security_group_id)
+
+                print("TRACE Before SUCCESS")
+                responseData = {}
+                cfnresponse.send(event, context, cfnresponse.SUCCESS, responseData, "CustomResourcePhysicalID")
+
+            except Exception as e:
+
+                print(e)
+                print("TRACE Before FAILED")
+
+                responseData = {}
+                cfnresponse.send(event, context, cfnresponse.FAILED, responseData, "CustomResourcePhysicalID")
+
+            return
+      Runtime: python3.9
+
+  ExecuteDeleteSecurityGroupsFunction:
+    Type: Custom::ExecuteDeleteSecurityGroupsFunction
+    Properties:
+      Vpc           : !Ref BitwardenVpc
+      ServiceToken  : !GetAtt DeleteSecurityGroupsFunction.Arn
+
+  #
+  # Roles to attach to an IAM user dedicated for bitwarden
+  # ======================================================
+  #
+
+  BitWardenCLIRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName: !Sub "${Prefix}-cli-role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+              - "lambda.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+
+  BitWardenCLIRolePolicy:
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-cli-role-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+             - "states:ListStateMachines"
+            Resource: "*"
+          -
+            Effect: "Allow"
+            Action: 
+             - "states:StartExecution"
+            Resource: !GetAtt AllowTemporaryAccessForAdmins.Arn 
+
+  BitWardenCLICloudShellRolePolicy:
+    Condition: UseCloudShell
+    Type: "AWS::IAM::ManagedPolicy"
+    Properties:
+      ManagedPolicyName: !Sub "${Prefix}-cli-cloud-shell-role-policy"
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          -
+            Effect: "Allow"
+            Action: 
+              - cloudshell:StopEnvironment
+              - cloudshell:CreateEnvironment
+              - cloudshell:GetEnvironmentStatus
+              - cloudshell:StartEnvironment
+              - cloudshell:CreateSession
+              - cloudshell:PutCredentials
+            Resource: "*"
+
+
+Outputs:
+  DNSName:
+    Value: !Sub "${DNSRecordName}.${DNSDomainName}"

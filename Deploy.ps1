@@ -1,0 +1,25 @@
+$BucketName="frpublic2"
+$BucketPrefix="Templates"
+
+$AWSProfile="development"
+$TemplateName="CloudFormationBitWarden.yml"
+$StackName="bitwarden"
+$Prefix="bitwarden"
+
+$DNSRecordName="bitwarden"
+$DNSDomainName="mydomain.nl."       # Last dot is important for finding the zone with this name in AWS!
+$MailServerPort="587"
+
+$AdminEmail="test@example.com"
+$AdminMobile="+31612345678"
+
+aws cloudformation create-stack --stack-name ${StackName} `
+                                --template-url https://${BucketName}.s3.amazonaws.com/${BucketPrefix}/${TemplateName} `
+                                --capabilities CAPABILITY_NAMED_IAM  `
+                                --parameters ParameterKey=Prefix,ParameterValue="${Prefix}" `
+                                             ParameterKey=DNSRecordName,ParameterValue="${DNSRecordName}" `
+                                             ParameterKey=DNSDomainName,ParameterValue="${DNSDomainName}" `
+                                             ParameterKey=MailServerPort,ParameterValue="${MailServerPort}" `
+                                             ParameterKey=AdminEmail,ParameterValue="${AdminEmail}" `
+                                             ParameterKey=AdminMobile,ParameterValue="${AdminMobile}" `
+                                --profile ${AWSProfile} 
