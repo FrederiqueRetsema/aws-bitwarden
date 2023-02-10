@@ -108,8 +108,8 @@ For most use cases you will use one of the apps to access your credentials. But 
 ```
 curl -O https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/main/AllowTempAccessInit.json -o AllowTempAccess.json
 curl -O https://raw.githubusercontent.com/FrederiqueRetsema/aws-bitwarden/main/AllowTempAccessCloudShell.sh 
-chmod 700 ./AllowTempAccess.sh
-ln -s ./AllowTempAccess.sh ./a
+chmod 700 ./AllowTempAccessCloudShell.sh
+ln -s ./AllowTempAccessCloudShell.sh ./a
 ```
 
 Then install the AWS app on your phone and use the newly created users credentials to log on to AWS and enter the CloudShell. In the cloud shell you just have to execute the command
