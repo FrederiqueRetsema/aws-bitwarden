@@ -10,8 +10,8 @@ $Prefix="bitwarden"
 $DNSRecordName="bitwarden"
 $DNSDomainName="mydomain.nl."       # Last dot is important for finding the zone with this name in AWS!
 $MailServerPort="587"
-$AdminEmail="test@retsema.eu"
-$AdminMobile="+31682390591"
+$AdminEmail="test@example.com"
+$AdminMobile="+31612345678"
 
 cfn-lint ${TemplateName}
 if ($LASTEXITCODE -ne 0) {
