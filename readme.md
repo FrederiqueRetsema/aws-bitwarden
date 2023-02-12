@@ -97,7 +97,7 @@ The email address is used:
 - When you want to make an export of all data in bitwarden, use JSON file type. CSV will NOT contain cards and identities. JSON will. You can import JSON within (an empty version of) bitwarden afterwards. When you import values that are already there then you will have double data in your vault...
 
 ## Using a dedicated user for bitwarden
-You might want to use a dedicated user for bitwarden. I tried to help a little bit by creating two roles:
+You might want to use a dedicated user for bitwarden. I tried to help a little bit by creating two policies:
 - bitwarden-cli-role-policy: use this one when you want to use the command line interface with least privileged access to start the shell scripts in this repository
 - bitwarden-cli-cloud-shell-role-policy: use this one when you want to use the shell script from AWS CloudShell (when you don't see this role then update the stack and change the UseCloudShellParameter parameter to True)
 
