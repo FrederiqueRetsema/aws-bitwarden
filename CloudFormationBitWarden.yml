@@ -1083,7 +1083,7 @@ Resources:
   CreateDeleteSnapshots:
     Type: AWS::DLM::LifecyclePolicy
     Properties:
-      Description: !Sub "${Prefix} - create daily snapshots of all volumes attached on the VM"
+      Description: !Sub "${Prefix} - create daily snapshots of all volumes attached to the VM"
       ExecutionRoleArn: !GetAtt SnapshotExecutionRole.Arn
       State: ENABLED
       PolicyDetails:
